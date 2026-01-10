@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kooka-server"
-version = "0.0.1"
+version = "0.0.2"
 description = "local inference web server for MLX / mlx-lm."
 readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "Anchen" }]
 dependencies = [
-  "mlx-lm",
+  "mlx-lm==0.30.2",
 ]
 
 [project.optional-dependencies]
