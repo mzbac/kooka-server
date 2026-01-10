@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kooka-server"
+version = "0.0.1"
+description = "local inference web server for MLX / mlx-lm."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "Anchen" }]
+dependencies = [
+  "mlx-lm",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "pytest-timeout>=2.3.0",
+  "requests>=2.31.0",
+]
+
+[project.scripts]
+kooka-server = "kooka_server.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+  "unit: fast unit tests (no server)",
+  "contract: contract tests (requires server)",
+  "minimax: MiniMax-specific contract tests",
+  "nemotron: Nemotron-specific contract tests",
+]
