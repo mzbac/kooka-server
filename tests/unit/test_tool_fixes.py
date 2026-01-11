@@ -69,3 +69,40 @@ def test_tool_fixes_minimax_path_normalization_is_schema_aware() -> None:
     fixed_no_schema = apply_tool_fixes(tool_call, ctx_no_schema)
     assert fixed_no_schema == tool_call
 
+
+@pytest.mark.unit
+def test_tool_fixes_minimax_repo_path_spacing_is_normalized() -> None:
+    from kooka_server.tool_fixes import ToolFixContext, apply as apply_tool_fixes
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "write_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        }
+    ]
+
+    tool_call = {
+        "name": "write_file",
+        "arguments": {
+            "path": "/repo/kooka--server. public/kooka- server/validate_mermaid. js",
+            "content": "OK",
+        },
+    }
+
+    ctx = ToolFixContext(
+        tool_parser_type="minimax_m2",
+        tools=tools,
+    )
+
+    fixed = apply_tool_fixes(tool_call, ctx)
+    assert fixed["arguments"]["path"] == "/repo/kooka--server.public/kooka-server/validate_mermaid.js"

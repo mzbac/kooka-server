@@ -109,8 +109,8 @@ def get_tool_parameters_schema(tools: Optional[list[dict]], tool_name: str) -> O
     return None
 
 
-def normalize_dot_ext_spacing_strict(arguments: Any, schema: Optional[dict]) -> Any:
-    """Normalize '. js' -> '.js' for schema-defined path/file-like fields."""
+def normalize_pathlike_strings_strict(arguments: Any, schema: Optional[dict], transform: Callable[[str], str]) -> Any:
+    """Apply a normalization function to schema-defined path/file-like string fields."""
     if not isinstance(schema, dict):
         return arguments
 
@@ -152,10 +152,20 @@ def normalize_dot_ext_spacing_strict(arguments: Any, schema: Optional[dict]) -> 
             return value
 
         if isinstance(value, str):
-            if key is not None and is_pathlike_key(key) and _DOTSPACE_EXT_RE.search(value):
-                return _DOTSPACE_EXT_RE.sub(r".\1", value)
+            if key is not None and is_pathlike_key(key):
+                return transform(value)
             return value
 
         return value
 
     return walk(arguments, schema, None)
+
+
+def normalize_dot_ext_spacing_strict(arguments: Any, schema: Optional[dict]) -> Any:
+    """Normalize '. js' -> '.js' for schema-defined path/file-like fields."""
+    def transform(value: str) -> str:
+        if not _DOTSPACE_EXT_RE.search(value):
+            return value
+        return _DOTSPACE_EXT_RE.sub(r".\1", value)
+
+    return normalize_pathlike_strings_strict(arguments, schema, transform)
