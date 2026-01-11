@@ -53,6 +53,41 @@ def main() -> None:
         default=2,
         help="Maximum number of prompt-cache entries to keep (LRU). Set to 0 to disable.",
     )
+    dist_p.add_argument(
+        "--batch",
+        action="store_true",
+        help="Enable server-side micro-batching across concurrent clients.",
+    )
+    dist_p.add_argument(
+        "--batch-max-inflight",
+        type=int,
+        default=4,
+        help="Maximum number of concurrent sequences in the active batch.",
+    )
+    dist_p.add_argument(
+        "--batch-prefill-batch-size",
+        type=int,
+        default=2,
+        help="Number of prompts to prefill together (lower uses less memory).",
+    )
+    dist_p.add_argument(
+        "--batch-prefill-step-size",
+        type=int,
+        default=2048,
+        help="Chunk size for prompt prefill steps (tokens).",
+    )
+    dist_p.add_argument(
+        "--batch-steps-per-tick",
+        type=int,
+        default=1,
+        help="Number of batch decode steps to run between request polls.",
+    )
+    dist_p.add_argument(
+        "--batch-wait-ms",
+        type=int,
+        default=10,
+        help="When starting a new batch, wait up to this long to gather more requests.",
+    )
 
     args = parser.parse_args()
 

@@ -58,6 +58,9 @@ class DistributedState:
         if self.rank == 0 and request_id and self.is_request_canceled(request_id):
             local = 1
 
+        if self.world_size == 1:
+            return local > 0
+
         # Avoid interleaving control collectives (cancel/stop checks) with async
         # pipeline prefetch from `stream_generate`, which can otherwise deadlock
         # multi-rank runs.
@@ -65,19 +68,20 @@ class DistributedState:
         flag = mx.array([local], dtype=mx.int32)
         flag = mx.distributed.all_sum(flag, stream=mx.cpu)
         mx.eval(flag)
-        mx.synchronize()
         return int(flag[0].item()) > 0
 
     def broadcast_request(self):
         """Broadcast request from rank 0 to all ranks.
 
         Returns (prompt_tokens, max_tokens, seed, temperature, top_p, top_k,
-        repetition_penalty, repetition_context_size, stop_token_sequences,
-        response_queue, request) or (None, 0, 0, 0.0, 0.0, 0, 0.0, ...).
+        seed_is_user, repetition_penalty, repetition_context_size,
+        stop_token_sequences, response_queue, request) or (None, 0, 0, 0.0,
+        0.0, 0, 0, 0.0, ...).
         """
         prompt_tokens = None
         max_tokens = 256
         seed = 0
+        seed_is_user = 0
         temperature = 0.0
         top_p = 0.0
         top_k = 0
@@ -93,7 +97,12 @@ class DistributedState:
                 request = self.request_queue.get_nowait()
                 prompt_tokens = request["prompt_tokens"]
                 max_tokens = request["max_tokens"]
-                seed = int(request.get("seed") or 0)
+                seed_raw = request.get("seed")
+                seed_is_user = 1 if request.get("seed_is_user") else 0
+                if seed_raw is None:
+                    seed = int(time.time_ns() & 0x7FFFFFFF)
+                else:
+                    seed = int(seed_raw)
                 temperature = float(request.get("temperature") or 0.0)
                 top_p = float(request.get("top_p") or 0.0)
                 top_k = int(request.get("top_k") or 0)
@@ -113,18 +122,18 @@ class DistributedState:
                 prompt_tokens = None
 
         # Broadcast metadata first so idle polling only does one collective.
-        # Metadata: [length, max_tokens, seed, top_k, stop_count, repetition_context_size]
+        # Metadata: [length, max_tokens, seed, top_k, stop_count, repetition_context_size, seed_is_user]
         if self.rank == 0:
             length = len(prompt_tokens) if prompt_tokens else 0
             if length > MAX_PROMPT_LENGTH:
                 length = MAX_PROMPT_LENGTH
             stop_count = min(len(stop_token_sequences or []), MAX_STOP_SEQUENCES)
             meta = mx.array(
-                [length, max_tokens, seed, top_k, stop_count, repetition_context_size],
+                [length, max_tokens, seed, top_k, stop_count, repetition_context_size, seed_is_user],
                 dtype=mx.int32,
             )
         else:
-            meta = mx.zeros((6,), dtype=mx.int32)
+            meta = mx.zeros((7,), dtype=mx.int32)
 
         t0 = time.perf_counter()
         meta = mx.distributed.all_sum(meta, stream=mx.cpu)
@@ -137,6 +146,7 @@ class DistributedState:
         top_k = int(meta[3].item())
         stop_count = int(meta[4].item())
         repetition_context_size = int(meta[5].item())
+        seed_is_user = int(meta[6].item())
 
         # Broadcast floats: [temperature, top_p, repetition_penalty]
         if length == 0:
@@ -146,6 +156,7 @@ class DistributedState:
                 0,
                 0.0,
                 0.0,
+                0,
                 0,
                 0.0,
                 DEFAULT_REPETITION_CONTEXT_SIZE,
@@ -231,6 +242,7 @@ class DistributedState:
             temperature,
             top_p,
             top_k,
+            seed_is_user,
             repetition_penalty,
             repetition_context_size,
             stop_token_sequences_out,
@@ -240,4 +252,3 @@ class DistributedState:
 
 
 __all__ = ["DistributedState"]
-

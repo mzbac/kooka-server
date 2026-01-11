@@ -20,7 +20,6 @@ from ..api.anthropic.messages import (
 from ..api.models_endpoint import list_models as list_v1_models
 from ..api.openai.tool_calls import make_openai_tool_call, normalize_finish_reason_for_tool_calls
 from ..logging_utils import redact_request_body
-from ..mlx_utils.tokenizer_compat import maybe_patch_tool_parser
 from ..tool_fixes import (
     ToolFixContext,
     apply as apply_tool_fixes,
@@ -41,6 +40,7 @@ class BadRequestError(Exception):
 class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     """Thread-per-request HTTP server."""
     daemon_threads = True
+
 
 class DistributedHandler(BaseHTTPRequestHandler):
     """HTTP request handler for distributed inference."""
@@ -127,12 +127,17 @@ class DistributedHandler(BaseHTTPRequestHandler):
         self._set_cors_headers()
         self.end_headers()
 
-    def _handle_chat(self):
-        body = self._parse_body()
-        messages = body.get("messages", [])
-        tools = body.get("tools")
-        stream = body.get("stream", False)
-        stream_options = body.get("stream_options", None)
+    def _parse_seed(self, body: dict) -> tuple[Optional[int], bool]:
+        seed = body.get("seed", None)
+        seed_is_user = seed is not None
+        if seed is None:
+            return None, False
+        try:
+            return int(seed), seed_is_user
+        except (TypeError, ValueError):
+            return None, False
+
+    def _parse_max_tokens(self, body: dict) -> int:
         max_tokens = body.get("max_completion_tokens", None)
         if max_tokens is None:
             max_tokens = body.get("max_tokens", self.args.max_tokens)
@@ -142,6 +147,9 @@ class DistributedHandler(BaseHTTPRequestHandler):
             raise BadRequestError("max_tokens must be a non-negative integer") from e
         if max_tokens < 0:
             raise BadRequestError("max_tokens must be a non-negative integer")
+        return max_tokens
+
+    def _parse_sampling(self, body: dict) -> tuple[float, float, int, float, int]:
         temperature = body.get("temperature", self.args.temperature)
         top_p = body.get("top_p", body.get("topP", self.args.top_p))
         top_k = body.get("top_k", body.get("topK", self.args.top_k))
@@ -149,9 +157,7 @@ class DistributedHandler(BaseHTTPRequestHandler):
         repetition_context_size = body.get(
             "repetition_context_size", DEFAULT_REPETITION_CONTEXT_SIZE
         )
-        seed = body.get("seed", None)
-        stop_words = body.get("stop") or []
-        model = body.get("model", self.args.model)
+
         try:
             temperature = float(temperature)
         except (TypeError, ValueError):
@@ -172,6 +178,7 @@ class DistributedHandler(BaseHTTPRequestHandler):
             repetition_context_size = int(repetition_context_size)
         except (TypeError, ValueError):
             repetition_context_size = DEFAULT_REPETITION_CONTEXT_SIZE
+
         if temperature < 0:
             temperature = float(self.args.temperature)
         if top_p < 0 or top_p > 1:
@@ -182,19 +189,17 @@ class DistributedHandler(BaseHTTPRequestHandler):
             repetition_penalty = DEFAULT_REPETITION_PENALTY
         if repetition_context_size < 0:
             repetition_context_size = DEFAULT_REPETITION_CONTEXT_SIZE
-        if seed is not None:
-            try:
-                seed = int(seed)
-            except (TypeError, ValueError):
-                seed = None
-        if seed is None:
-            seed = int(time.time_ns() & 0x7FFFFFFF)
+
+        return temperature, top_p, top_k, repetition_penalty, repetition_context_size
+
+    def _parse_stop_token_sequences(self, stop_words: object) -> List[List[int]]:
         if isinstance(stop_words, str):
             stop_words = [stop_words]
         if not isinstance(stop_words, list):
             stop_words = []
         stop_words = [s for s in stop_words if isinstance(s, str) and s]
-        stop_token_sequences = []
+
+        stop_token_sequences: List[List[int]] = []
         for sw in stop_words[:MAX_STOP_SEQUENCES]:
             try:
                 seq = self.tokenizer.encode(sw, add_special_tokens=False)
@@ -202,6 +207,33 @@ class DistributedHandler(BaseHTTPRequestHandler):
                 seq = self.tokenizer.encode(sw)
             if seq:
                 stop_token_sequences.append(seq)
+        return stop_token_sequences
+
+    def _handle_chat(self):
+        body = self._parse_body()
+        messages = body.get("messages", [])
+        tools = body.get("tools")
+        tool_choice = body.get("tool_choice")
+        stream = body.get("stream", False)
+        stream_options = body.get("stream_options", None)
+        max_tokens = self._parse_max_tokens(body)
+        temperature, top_p, top_k, repetition_penalty, repetition_context_size = self._parse_sampling(body)
+        seed, seed_is_user = self._parse_seed(body)
+        stop_token_sequences = self._parse_stop_token_sequences(body.get("stop") or [])
+        model = body.get("model", self.args.model)
+
+        # Tool calling is particularly sensitive to sampling randomness, and
+        # opencode-style clients expect a reliable tool_calls finish when
+        # tool_choice is forced. If the user didn't explicitly provide sampling
+        # parameters, use greedy decoding for forced tool_choice requests.
+        forced_tool_choice = isinstance(tool_choice, dict) or tool_choice == "required"
+        if tools and forced_tool_choice:
+            if "temperature" not in body:
+                temperature = 0.0
+            if "top_p" not in body and "topP" not in body:
+                top_p = 1.0
+            if "top_k" not in body and "topK" not in body:
+                top_k = 0
 
         logging.info(f"Received request: model={model}, max_tokens={max_tokens}, stream={stream}, num_messages={len(messages)}")
         if logging.getLogger().isEnabledFor(logging.DEBUG):
@@ -233,6 +265,7 @@ class DistributedHandler(BaseHTTPRequestHandler):
             "prompt_tokens": prompt_tokens,
             "max_tokens": max_tokens,
             "seed": seed,
+            "seed_is_user": seed_is_user,
             "temperature": temperature,
             "top_p": top_p,
             "top_k": top_k,
@@ -644,75 +677,11 @@ class DistributedHandler(BaseHTTPRequestHandler):
         body = self._parse_body()
         prompt = body.get("prompt", "")
         stream = body.get("stream", False)
-        max_tokens = body.get("max_completion_tokens", None)
-        if max_tokens is None:
-            max_tokens = body.get("max_tokens", self.args.max_tokens)
-        try:
-            max_tokens = int(max_tokens)
-        except (TypeError, ValueError) as e:
-            raise BadRequestError("max_tokens must be a non-negative integer") from e
-        if max_tokens < 0:
-            raise BadRequestError("max_tokens must be a non-negative integer")
-        temperature = body.get("temperature", self.args.temperature)
-        top_p = body.get("top_p", body.get("topP", self.args.top_p))
-        top_k = body.get("top_k", body.get("topK", self.args.top_k))
-        repetition_penalty = body.get("repetition_penalty", DEFAULT_REPETITION_PENALTY)
-        repetition_context_size = body.get(
-            "repetition_context_size", DEFAULT_REPETITION_CONTEXT_SIZE
-        )
-        seed = body.get("seed", None)
-        stop_words = body.get("stop") or []
+        max_tokens = self._parse_max_tokens(body)
+        temperature, top_p, top_k, repetition_penalty, repetition_context_size = self._parse_sampling(body)
+        seed, seed_is_user = self._parse_seed(body)
+        stop_token_sequences = self._parse_stop_token_sequences(body.get("stop") or [])
         model = body.get("model", self.args.model)
-        try:
-            temperature = float(temperature)
-        except (TypeError, ValueError):
-            temperature = float(self.args.temperature)
-        try:
-            top_p = float(top_p)
-        except (TypeError, ValueError):
-            top_p = float(self.args.top_p)
-        try:
-            top_k = int(top_k)
-        except (TypeError, ValueError):
-            top_k = int(self.args.top_k)
-        try:
-            repetition_penalty = float(repetition_penalty)
-        except (TypeError, ValueError):
-            repetition_penalty = DEFAULT_REPETITION_PENALTY
-        try:
-            repetition_context_size = int(repetition_context_size)
-        except (TypeError, ValueError):
-            repetition_context_size = DEFAULT_REPETITION_CONTEXT_SIZE
-        if temperature < 0:
-            temperature = float(self.args.temperature)
-        if top_p < 0 or top_p > 1:
-            top_p = float(self.args.top_p)
-        if top_k < 0:
-            top_k = int(self.args.top_k)
-        if repetition_penalty < 0:
-            repetition_penalty = DEFAULT_REPETITION_PENALTY
-        if repetition_context_size < 0:
-            repetition_context_size = DEFAULT_REPETITION_CONTEXT_SIZE
-        if seed is not None:
-            try:
-                seed = int(seed)
-            except (TypeError, ValueError):
-                seed = None
-        if seed is None:
-            seed = int(time.time_ns() & 0x7FFFFFFF)
-        if isinstance(stop_words, str):
-            stop_words = [stop_words]
-        if not isinstance(stop_words, list):
-            stop_words = []
-        stop_words = [s for s in stop_words if isinstance(s, str) and s]
-        stop_token_sequences = []
-        for sw in stop_words[:MAX_STOP_SEQUENCES]:
-            try:
-                seq = self.tokenizer.encode(sw, add_special_tokens=False)
-            except TypeError:
-                seq = self.tokenizer.encode(sw)
-            if seq:
-                stop_token_sequences.append(seq)
 
         prompt_tokens = self.tokenizer.encode(prompt)
 
@@ -723,6 +692,7 @@ class DistributedHandler(BaseHTTPRequestHandler):
             "prompt_tokens": prompt_tokens,
             "max_tokens": max_tokens,
             "seed": seed,
+            "seed_is_user": seed_is_user,
             "temperature": temperature,
             "top_p": top_p,
             "top_k": top_k,
@@ -832,73 +802,11 @@ class DistributedHandler(BaseHTTPRequestHandler):
         tools = convert_anthropic_tools(body.get("tools"))
 
         stream = body.get("stream", False)
-        max_tokens = body.get("max_tokens", self.args.max_tokens)
-        try:
-            max_tokens = int(max_tokens)
-        except (TypeError, ValueError) as e:
-            raise BadRequestError("max_tokens must be a non-negative integer") from e
-        if max_tokens < 0:
-            raise BadRequestError("max_tokens must be a non-negative integer")
-        temperature = body.get("temperature", self.args.temperature)
-        top_p = body.get("top_p", body.get("topP", self.args.top_p))
-        top_k = body.get("top_k", body.get("topK", self.args.top_k))
-        repetition_penalty = body.get("repetition_penalty", DEFAULT_REPETITION_PENALTY)
-        repetition_context_size = body.get(
-            "repetition_context_size", DEFAULT_REPETITION_CONTEXT_SIZE
-        )
-        seed = body.get("seed", None)
-        stop_words = body.get("stop_sequences") or []
+        max_tokens = self._parse_max_tokens(body)
+        temperature, top_p, top_k, repetition_penalty, repetition_context_size = self._parse_sampling(body)
+        seed, seed_is_user = self._parse_seed(body)
+        stop_token_sequences = self._parse_stop_token_sequences(body.get("stop_sequences") or [])
         model = body.get("model", self.args.model)
-        try:
-            temperature = float(temperature)
-        except (TypeError, ValueError):
-            temperature = float(self.args.temperature)
-        try:
-            top_p = float(top_p)
-        except (TypeError, ValueError):
-            top_p = float(self.args.top_p)
-        try:
-            top_k = int(top_k)
-        except (TypeError, ValueError):
-            top_k = int(self.args.top_k)
-        try:
-            repetition_penalty = float(repetition_penalty)
-        except (TypeError, ValueError):
-            repetition_penalty = DEFAULT_REPETITION_PENALTY
-        try:
-            repetition_context_size = int(repetition_context_size)
-        except (TypeError, ValueError):
-            repetition_context_size = DEFAULT_REPETITION_CONTEXT_SIZE
-        if temperature < 0:
-            temperature = float(self.args.temperature)
-        if top_p < 0 or top_p > 1:
-            top_p = float(self.args.top_p)
-        if top_k < 0:
-            top_k = int(self.args.top_k)
-        if repetition_penalty < 0:
-            repetition_penalty = DEFAULT_REPETITION_PENALTY
-        if repetition_context_size < 0:
-            repetition_context_size = DEFAULT_REPETITION_CONTEXT_SIZE
-        if seed is not None:
-            try:
-                seed = int(seed)
-            except (TypeError, ValueError):
-                seed = None
-        if seed is None:
-            seed = int(time.time_ns() & 0x7FFFFFFF)
-        if isinstance(stop_words, str):
-            stop_words = [stop_words]
-        if not isinstance(stop_words, list):
-            stop_words = []
-        stop_words = [s for s in stop_words if isinstance(s, str) and s]
-        stop_token_sequences = []
-        for sw in stop_words[:MAX_STOP_SEQUENCES]:
-            try:
-                seq = self.tokenizer.encode(sw, add_special_tokens=False)
-            except TypeError:
-                seq = self.tokenizer.encode(sw)
-            if seq:
-                stop_token_sequences.append(seq)
 
         process_message_content(messages)
         prompt = self.tokenizer.apply_chat_template(messages, tools=tools, add_generation_prompt=True, tokenize=False)
@@ -912,6 +820,7 @@ class DistributedHandler(BaseHTTPRequestHandler):
             "prompt_tokens": prompt_tokens,
             "max_tokens": max_tokens,
             "seed": seed,
+            "seed_is_user": seed_is_user,
             "temperature": temperature,
             "top_p": top_p,
             "top_k": top_k,
