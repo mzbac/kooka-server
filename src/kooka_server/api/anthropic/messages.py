@@ -49,7 +49,7 @@ def convert_anthropic_to_openai_messages(body: dict) -> list[dict]:
                         "type": "function",
                         "function": {
                             "name": block.get("name", ""),
-                            "arguments": block.get("input", {}),
+                            "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
                         },
                     }
                 )
@@ -123,8 +123,10 @@ def process_message_content(messages: list[dict]) -> None:
                     continue
                 args = func.get("arguments")
                 if isinstance(args, str):
-                    try:
-                        func["arguments"] = json.loads(args)
-                    except (json.JSONDecodeError, ValueError):
-                        func["arguments"] = {}
-
+                    if args:
+                        try:
+                            json.loads(args)
+                        except (json.JSONDecodeError, ValueError):
+                            func["arguments"] = "{}"
+                elif args is not None:
+                    func["arguments"] = json.dumps(args, ensure_ascii=False)
