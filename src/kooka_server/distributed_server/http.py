@@ -33,6 +33,23 @@ from .constants import (
 )
 
 
+def apply_chat_template_safe(
+    tokenizer: Any,
+    messages: list[dict],
+    *,
+    tools: Any,
+    add_generation_prompt: bool,
+    tokenize: bool,
+) -> str:
+    """Apply a chat template while normalizing empty tools to None."""
+    return tokenizer.apply_chat_template(
+        messages,
+        tools=tools or None,
+        add_generation_prompt=add_generation_prompt,
+        tokenize=tokenize,
+    )
+
+
 class BadRequestError(Exception):
     pass
 
@@ -250,8 +267,12 @@ class DistributedHandler(BaseHTTPRequestHandler):
 
         process_message_content(messages)
 
-        prompt = self.tokenizer.apply_chat_template(
-            messages, tools=tools, add_generation_prompt=True, tokenize=False
+        prompt = apply_chat_template_safe(
+            self.tokenizer,
+            messages,
+            tools=tools,
+            add_generation_prompt=True,
+            tokenize=False,
         )
         emit_initial_think = prompt.rstrip().endswith("<think>")
         prompt_tokens = self.tokenizer.encode(prompt)
@@ -809,7 +830,13 @@ class DistributedHandler(BaseHTTPRequestHandler):
         model = body.get("model", self.args.model)
 
         process_message_content(messages)
-        prompt = self.tokenizer.apply_chat_template(messages, tools=tools, add_generation_prompt=True, tokenize=False)
+        prompt = apply_chat_template_safe(
+            self.tokenizer,
+            messages,
+            tools=tools,
+            add_generation_prompt=True,
+            tokenize=False,
+        )
         emit_initial_think = prompt.rstrip().endswith("<think>")
         prompt_tokens = self.tokenizer.encode(prompt)
 
@@ -855,6 +882,11 @@ class DistributedHandler(BaseHTTPRequestHandler):
                 try:
                     item = queue.get(timeout=60)
                 except Empty:
+                    try:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                    except (BrokenPipeError, ConnectionResetError, OSError):
+                        raise
                     continue
                 if item is None:
                     break

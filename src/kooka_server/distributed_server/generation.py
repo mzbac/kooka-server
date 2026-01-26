@@ -14,7 +14,6 @@ from mlx_lm import stream_generate
 from mlx_lm.generate import BatchGenerator
 from mlx_lm.models.cache import (
     ArraysCache,
-    cache_length,
     can_trim_prompt_cache,
     KVCache,
     make_prompt_cache,
@@ -282,19 +281,12 @@ def _serve_one_request_sequential(
     if rank == 0:
         cache_hit = cached_prompt_cache is not None
         reused_len = max(0, full_prompt_len - len(tokens_to_process))
-        cached_len = 0
-        if cached_prompt_cache is not None:
-            try:
-                cached_len = int(cache_length(cached_prompt_cache))
-            except Exception:
-                cached_len = 0
         logging.info(
-            "Starting generation: prompt_len=%d cache_hit=%s reused_len=%d to_process_len=%d cached_len=%d max_tokens=%s",
+            "Starting generation: prompt_len=%d cache_hit=%s reused_len=%d to_process_len=%d max_tokens=%s",
             full_prompt_len,
             cache_hit,
             reused_len,
             len(tokens_to_process),
-            cached_len,
             str(max_tokens),
         )
         gen_start_t = time.perf_counter()
@@ -424,14 +416,10 @@ def _serve_one_request_sequential(
         # Save full cache (prompt + generated tokens).
         prompt_cache_store.insert_cache(args.model, cache_key, prompt_cache)
         if rank == 0:
-            try:
-                stored_len = int(cache_length(prompt_cache))
-            except Exception:
-                stored_len = 0
             logging.info(
-                "Saved prompt cache: key_len=%d cache_len=%d",
+                "Saved prompt cache: key_len=%d cache_items=%d",
                 len(cache_key),
-                stored_len,
+                len(prompt_cache) if prompt_cache is not None else 0,
             )
 
         if rank == 0:

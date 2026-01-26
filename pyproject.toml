@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 authors = [{ name = "Anchen" }]
 dependencies = [
-  "mlx-lm==0.30.2",
+  "mlx-lm==0.30.5",
 ]
 
 [project.optional-dependencies]

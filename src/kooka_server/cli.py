@@ -3,6 +3,7 @@ import json
 import logging
 
 from .distributed import serve_distributed
+from .mlx_utils.wired_limit import set_default_wired_limit
 from .server import serve
 
 
@@ -95,6 +96,8 @@ def main() -> None:
         level=getattr(logging, args.log_level.upper(), logging.INFO),
         format="%(asctime)s - %(levelname)s - %(message)s",
     )
+
+    set_default_wired_limit()
 
     if args.cmd == "serve":
         serve(args)
